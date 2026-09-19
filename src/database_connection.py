@@ -1,6 +1,7 @@
 import os
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
+import pandas as pd
 
 load_dotenv()
 
@@ -9,11 +10,16 @@ engine = create_engine(
     f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 )
 
-with engine.connect() as connection:
-    result = connection.execute(
-        text("SELECT COUNT(*) FROM clean_loans_model")
-    )
-    count = result.scalar()
+query = "SELECT * FROM clean_loans_model"
 
-print("Connected successfully.")
-print(f"Rows in clean_loans_model: {count:,}")
+df = pd.read_sql(query, engine)
+
+print("Dataset loaded successfully.")
+print(f"Rows: {len(df):,}")
+print(f"Columns: {len(df.columns)}")
+
+print("\nData types:")
+print(df.dtypes)
+
+print("\nMissing values:")
+print(df.isnull().sum().sort_values(ascending=False).head(20))
