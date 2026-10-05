@@ -1,20 +1,11 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 import pandas as pd
 
-load_dotenv()
-
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
-)
-
-query = "SELECT * FROM clean_loans_model"
-
-df = pd.read_sql(query, engine)
-
-numeric_columns = [
+NUMERIC_COLUMNS = [
     "loan_amnt",
     "funded_amnt",
     "funded_amnt_inv",
@@ -103,113 +94,123 @@ numeric_columns = [
     "sec_app_num_rev_accts",
     "sec_app_chargeoff_within_12_mths",
     "sec_app_collections_12_mths_ex_med",
-    "sec_app_mths_since_last_major_derog"
+    "sec_app_mths_since_last_major_derog",
 ]
 
-for column in numeric_columns:
-    df[column] = pd.to_numeric(df[column], errors="coerce")
 
-df["issue_d"] = pd.to_datetime(
-    df["issue_d"],
-    format="%b-%y",
-    errors="coerce"
-)
+def load_env():
+    load_dotenv()
+    here = Path(__file__).resolve()
+    load_dotenv(here.parents[1] / ".env")
+    load_dotenv(here.parents[2] / ".env")
 
-# Convert loan term to number of months
-df["term"] = df["term"].str.extract(r"(\d+)").astype(float)
 
-# Convert employment length to years
-df["emp_length"] = (
-    df["emp_length"]
-    .str.replace("+ years", "", regex=False)
-    .str.replace("< 1 year", "0", regex=False)
-    .str.replace(" years", "", regex=False)
-    .str.replace(" year", "", regex=False)
-)
+def get_engine():
+    load_env()
+    return create_engine(
+        f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+        f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
+    )
 
-df["emp_length"] = pd.to_numeric(df["emp_length"], errors="coerce")
 
-# Convert credit history start date
-df["earliest_cr_line"] = pd.to_datetime(
-    df["earliest_cr_line"],
-    format="%b-%y",
-    errors="coerce"
-)
+def load_loans():
+    engine = get_engine()
+    return pd.read_sql("SELECT * FROM clean_loans_model", engine)
 
-# Calculate credit history length in months
-df["credit_history_months"] = (
-    (df["issue_d"].dt.year - df["earliest_cr_line"].dt.year) * 12
-    + (df["issue_d"].dt.month - df["earliest_cr_line"].dt.month)
-)
 
-# Convert secondary applicant credit history date
-df["sec_app_earliest_cr_line"] = pd.to_datetime(
-    df["sec_app_earliest_cr_line"],
-    format="%b-%y",
-    errors="coerce"
-)
+def prepare_loans(df):
+    df = df.copy()
 
-df["sec_credit_history_months"] = (
-    (df["issue_d"].dt.year - df["sec_app_earliest_cr_line"].dt.year) * 12
-    + (df["issue_d"].dt.month - df["sec_app_earliest_cr_line"].dt.month)
-)
+    for column in NUMERIC_COLUMNS:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
 
-df = df.drop(
-    columns=["earliest_cr_line", "sec_app_earliest_cr_line"]
-)
+    df["issue_d"] = pd.to_datetime(df["issue_d"], format="%b-%y", errors="coerce")
 
-print("Data preparation successful.")
-print(f"Rows: {len(df):,}")
-print(f"Columns: {len(df.columns)}")
+    df["term"] = df["term"].str.extract(r"(\d+)").astype(float)
 
-print("\nData types:")
-print(df.dtypes.value_counts())
+    df["emp_length"] = (
+        df["emp_length"]
+        .str.replace("+ years", "", regex=False)
+        .str.replace("< 1 year", "0", regex=False)
+        .str.replace(" years", "", regex=False)
+        .str.replace(" year", "", regex=False)
+    )
+    df["emp_length"] = pd.to_numeric(df["emp_length"], errors="coerce")
 
-print("\nTarget distribution:")
-print(df["default_flag"].value_counts())
+    df["earliest_cr_line"] = pd.to_datetime(
+        df["earliest_cr_line"], format="%b-%y", errors="coerce"
+    )
+    df["credit_history_months"] = (
+        (df["issue_d"].dt.year - df["earliest_cr_line"].dt.year) * 12
+        + (df["issue_d"].dt.month - df["earliest_cr_line"].dt.month)
+    )
 
-print("\nMissing values:")
-print(df.isnull().sum().sort_values(ascending=False).head(15))
+    if "sec_app_earliest_cr_line" in df.columns:
+        df["sec_app_earliest_cr_line"] = pd.to_datetime(
+            df["sec_app_earliest_cr_line"], format="%b-%y", errors="coerce"
+        )
+        df["sec_credit_history_months"] = (
+            (df["issue_d"].dt.year - df["sec_app_earliest_cr_line"].dt.year) * 12
+            + (df["issue_d"].dt.month - df["sec_app_earliest_cr_line"].dt.month)
+        )
 
-print("\nCategorical columns:")
-for column in df.select_dtypes(include=["str"]).columns:
-    print(f"\n{column}:")
-    print(df[column].value_counts(dropna=False).head(10))
+    df["fico_avg"] = (df["fico_range_low"] + df["fico_range_high"]) / 2
 
-print("\nIssue date range:")
-print("Earliest:", df["issue_d"].min())
-print("Latest:", df["issue_d"].max())
+    df = df.drop(
+        columns=["earliest_cr_line", "sec_app_earliest_cr_line"],
+        errors="ignore",
+    )
+    return df
 
-train_df = df[df["issue_d"] < "2018-01-01"].copy()
-test_df = df[df["issue_d"] >= "2018-01-01"].copy()
 
-print("\nTrain/test split:")
-print(f"Training rows: {len(train_df):,}")
-print(f"Testing rows: {len(test_df):,}")
+def temporal_split(df, cutoff="2018-01-01"):
+    train_df = df[df["issue_d"] < cutoff].copy()
+    test_df = df[df["issue_d"] >= cutoff].copy()
+    return train_df, test_df
 
-print("\nTraining date range:")
-print(train_df["issue_d"].min(), "to", train_df["issue_d"].max())
 
-print("\nTesting date range:")
-print(test_df["issue_d"].min(), "to", test_df["issue_d"].max())
+def print_preparation_summary(df, train_df, test_df):
+    print("Data preparation successful.")
+    print(f"Rows: {len(df):,}")
+    print(f"Columns: {len(df.columns)}")
 
-print("\nTraining target distribution:")
-print(train_df["default_flag"].value_counts())
+    print("\nData types:")
+    print(df.dtypes.value_counts())
 
-print("\nTesting target distribution:")
-print(test_df["default_flag"].value_counts())
+    print("\nTarget distribution:")
+    print(df["default_flag"].value_counts())
 
-print("\nConverted features:")
-print(df[["term", "emp_length"]].head(10))
+    print("\nMissing values:")
+    print(df.isnull().sum().sort_values(ascending=False).head(15))
 
-print("\nCredit history features:")
-print("\nCredit history features:")
-print(
-    df[
-        [
-            "issue_d",
-            "credit_history_months",
-            "sec_credit_history_months"
-        ]
-    ].head(10)
-)
+    print("\nCategorical columns:")
+    for column in df.select_dtypes(include=["object"]).columns:
+        print(f"\n{column}:")
+        print(df[column].value_counts(dropna=False).head(10))
+
+    print("\nIssue date range:")
+    print("Earliest:", df["issue_d"].min())
+    print("Latest:", df["issue_d"].max())
+
+    print("\nTrain/test split:")
+    print(f"Training rows: {len(train_df):,}")
+    print(f"Testing rows: {len(test_df):,}")
+
+    print("\nTraining date range:")
+    print(train_df["issue_d"].min(), "to", train_df["issue_d"].max())
+
+    print("\nTesting date range:")
+    print(test_df["issue_d"].min(), "to", test_df["issue_d"].max())
+
+    print("\nTraining target distribution:")
+    print(train_df["default_flag"].value_counts())
+
+    print("\nTesting target distribution:")
+    print(test_df["default_flag"].value_counts())
+
+
+if __name__ == "__main__":
+    df = prepare_loans(load_loans())
+    train_df, test_df = temporal_split(df)
+    print_preparation_summary(df, train_df, test_df)
